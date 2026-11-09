@@ -111,7 +111,7 @@ The catalog Service selects all Pods labeled `app: catalog`. Kubernetes Services
 
 ## 4. Install Istio
 
-Install Istio CLI from the [official Getting Started guide](https://istio.io/latest/docs/setup/getting-started/) using a compatible 1.31.x release, then:
+Install the Istio 1.31.4 CLI from the [official Getting Started guide](https://istio.io/latest/docs/setup/getting-started/), then:
 
 ```bash
 ./scripts/install-istio.sh
