@@ -4,10 +4,3 @@ name: istio-lab
 nodes:
   - role: control-plane
     image: kindest/node:v1.35.0
-    extraPortMappings:
-      - containerPort: 30080
-        hostPort: 8080
-        protocol: TCP
-      - containerPort: 30081
-        hostPort: 8081
-        protocol: TCP
