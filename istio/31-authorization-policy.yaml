@@ -1,0 +1,18 @@
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: catalog-allow-frontend
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: catalog
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/shop/sa/default
+      to:
+        - operation:
+            methods: ["GET"]
