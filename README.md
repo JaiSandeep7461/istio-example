@@ -1,49 +1,68 @@
-# Istio on KIND: Online Shop Service Mesh Lab
+# Istio on KIND — Scenario-First Service Mesh Lab
 
-This lab teaches what Istio is, why Kubernetes users add it, and how to demonstrate its features locally.
+This repository teaches Istio **from the Kubernetes networking problem first**, instead of starting with Istio terminology.
 
-**Scenario:** an online shop contains a frontend, catalog v1/v2, and reviews. First deploy using Kubernetes Services only. Then install Istio and demonstrate sidecar injection, 80/20 canary traffic, beta-header routing, fault injection, strict mTLS, authorization, and ingress.
+The learning pattern for every topic is:
 
-## What is Istio?
+1. **Run normal Kubernetes without Istio**
+2. **Observe the traffic flow**
+3. **Identify the limitation/problem**
+4. **Introduce Istio**
+5. **Run the same request again**
+6. **Compare the traffic path**
+7. **Prove what changed with kubectl / istioctl / logs / packet capture**
 
-Istio is a **service mesh**: a layer that manages application traffic between services and provides traffic management, workload security, and telemetry. Kubernetes still schedules Pods, restarts containers, provides Service discovery, and runs cluster networking. Istio does not replace Kubernetes or your CNI.
+## Core mental model
 
-This repository uses Istio's **sidecar mode**. A participating Pod gets an Envoy `istio-proxy` container beside its application container.
+Do not start with:
 
-- `istiod` is the control plane. It watches workloads and mesh configuration, then programs proxies.
-- Envoy sidecars form the data plane. They intercept and handle application traffic.
-- `DestinationRule` defines destination subsets and policies.
-- `VirtualService` controls request routing and weights.
-- `PeerAuthentication` controls inbound mTLS mode.
-- `AuthorizationPolicy` controls which workload identity may do what.
-- `Gateway` configures an edge proxy listener; `VirtualService` binds routes to it.
+> "Istio is a service mesh."
 
-Kubernetes Service DNS continues to work; Istio provides policy-aware traffic control on top.
+Start with:
 
-## Architecture
+> **Kubernetes already provides connectivity. Istio is added when we need more control over that connectivity.**
 
-```mermaid
-flowchart LR
- U[User] --> FE[frontend]
- FE --> CS[Kubernetes Service: catalog]
- CS --> V1[catalog v1 Pods]
- CS --> V2[catalog v2 Pods]
- FE --> RS[Kubernetes Service: reviews]
- RS --> R[reviews Pod]
- subgraph Mesh[Istio mesh]
-  FE -. Envoy .- V1
-  FE -. Envoy .- V2
-  FE -. Envoy .- R
- end
- CP[istiod] -. configures .-> FE
- CP -. configures .-> V1
- CP -. configures .-> V2
- CP -. configures .-> R
-```
+Examples:
 
-## Prerequisites and version
+- Kubernetes Service → basic service discovery and endpoint load balancing
+- Istio VirtualService → application-aware routing
+- Istio DestinationRule → destination subsets and connection policies
+- Istio ingress gateway → controlled mesh entry point
+- Istio egress gateway → controlled mesh exit point
+- Istio mTLS → workload-to-workload authentication and encrypted proxy-to-proxy transport
+- Istio AuthorizationPolicy → identity-aware access control
+- Istio sidecar → Envoy proxy in each participating Pod
+- Istio ambient → ztunnel per node, with optional waypoint for L7 processing
 
-Install Docker, KIND, kubectl, curl, Bash, and `istioctl` 1.31.x. On Windows use WSL Ubuntu or Git Bash with Docker Desktop configured. KIND pins Kubernetes node image `kindest/node:v1.35.0`; check the [Istio supported-release matrix](https://istio.io/latest/docs/releases/supported-releases/) before changing versions and use a Kubernetes release supported by your chosen Istio minor.
+## Scenario map
+
+| Scenario | First without Istio | Then with Istio | Main question |
+|---|---|---|---|
+| 01 | Pod → Service → Pod | Sidecar → Sidecar | What does Istio add to normal service traffic? |
+| 02 | Internet → Service → Pod | Ingress Gateway → Service | Why do we need an ingress gateway? |
+| 03 | Pod → Node → Internet | Egress Gateway | How do we control outbound traffic? |
+| 04 | Plain application traffic | Envoy + mTLS | Where is traffic actually encrypted? |
+| 05 | Service selects Pods | VirtualService + DestinationRule | How do we do 80/20 and header routing? |
+| 06 | Application handles failures | Istio retries/timeouts/fault injection | Can traffic behavior be controlled outside code? |
+| 07 | Network connectivity only | AuthorizationPolicy | Can identity decide who may call whom? |
+| 08 | Envoy in every Pod | ztunnel + optional waypoint | How does ambient change the data plane? |
+
+---
+
+# 1. Prerequisites
+
+Install:
+
+- Docker
+- KIND
+- kubectl
+- curl
+- Bash
+- istioctl 1.31.x
+
+The lab uses KIND node image `kindest/node:v1.35.0`.
+
+Check:
 
 ```bash
 docker version
@@ -53,17 +72,9 @@ istioctl version --remote=false
 curl --version
 ```
 
-## Repository layout
+---
 
-```text
-kind/cluster.yaml
-apps/frontend/{Dockerfile,app.py}
-base/{namespace,catalog,reviews,frontend}.yaml
-istio/{00-demo-gateway,10-catalog-destination-rule,11-catalog-canary-virtual-service,12-catalog-header-route,20-reviews-resilience,30-peer-authentication-strict,31-authorization-policy}.yaml
-scripts/{build-and-load,deploy-baseline,install-istio,enable-mesh,test-traffic,cleanup}.sh
-```
-
-## 1. Create KIND cluster
+# 2. Create the KIND cluster
 
 ```bash
 kind create cluster --name istio-lab --config kind/cluster.yaml
@@ -71,24 +82,30 @@ kubectl cluster-info --context kind-istio-lab
 kubectl get nodes -o wide
 ```
 
-## 2. Build and load frontend image
+Build/load the frontend image:
 
 ```bash
 chmod +x scripts/*.sh
 ./scripts/build-and-load.sh
 ```
 
-KIND nodes cannot automatically use images from your host Docker cache; the script loads the image into KIND.
+---
 
-## 3. Deploy without Istio (baseline)
+# 3. Scenario 01 — Normal Kubernetes traffic
+
+Read first:
+
+- [Scenario 01 — Normal Kubernetes traffic](scenarios/01-normal-kubernetes.md)
+
+Run:
 
 ```bash
 ./scripts/deploy-baseline.sh
-kubectl -n shop get deploy,pods,svc -o wide
+kubectl -n shop get pods,svc,endpoints -o wide
 kubectl -n shop port-forward svc/frontend 8080:8080
 ```
 
-Leave port-forward running. In another terminal:
+In another terminal:
 
 ```bash
 curl -s http://localhost:8080/
@@ -96,125 +113,60 @@ curl -s http://localhost:8080/call/catalog
 curl -s http://localhost:8080/call/reviews
 ```
 
-The frontend calls `catalog:5678` and `reviews:5678` through Kubernetes Service DNS.
+The important flow is:
 
-### Show the Kubernetes-only limitation
-
-```bash
-kubectl -n shop scale deploy/catalog-v1 --replicas=2
-kubectl -n shop scale deploy/catalog-v2 --replicas=2
-kubectl -n shop get pods -l app=catalog -L version
-for i in {1..12}; do curl -s http://localhost:8080/call/catalog; done
+```text
+frontend Pod
+     |
+     | DNS: catalog.shop.svc.cluster.local
+     v
+Kubernetes Service
+     |
+     v
+catalog Pod
 ```
 
-The catalog Service selects all Pods labeled `app: catalog`. Kubernetes Services do basic endpoint selection/load balancing; they do not natively express an application-level 80/20 version split or header-based route. That is the policy problem Istio will solve. Stop port-forward with Ctrl+C.
+No Istio is involved.
 
-## 4. Install Istio
+---
 
-Install the Istio 1.31.4 CLI from the [official Getting Started guide](https://istio.io/latest/docs/setup/getting-started/), then:
+# 4. Scenario 02 — Ingress
 
-```bash
-./scripts/install-istio.sh
-kubectl get pods -n istio-system
-istioctl version
+Read:
+
+- [Scenario 02 — Ingress: normal Kubernetes first](scenarios/02-ingress.md)
+
+First understand direct Kubernetes access:
+
+```text
+Client
+  |
+  v
+Kubernetes Service
+  |
+  v
+frontend Pod
 ```
 
-The script uses the `demo` profile for this disposable lab. This profile is for evaluation, not production sizing.
+Then introduce:
 
-## 5. Enable sidecar injection
-
-```bash
-./scripts/enable-mesh.sh
-kubectl -n shop get pods
-POD=$(kubectl -n shop get pod -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-kubectl -n shop get pod "$POD" -o jsonpath='{.spec.containers[*].name}{"\\n"}'
-istioctl proxy-status
-istioctl proxy-config listeners "$POD" -n shop
+```text
+Client
+  |
+  v
+Istio Ingress Gateway
+  |
+  v
+VirtualService
+  |
+  v
+frontend Service
+  |
+  v
+frontend Pod
 ```
 
-Expected containers include `frontend` and `istio-proxy`. `istiod` configures proxies; it is not in the request path.
-
-## 6. Canary: 80% v1 and 20% v2
-
-```bash
-kubectl apply -f istio/10-catalog-destination-rule.yaml
-kubectl apply -f istio/11-catalog-canary-virtual-service.yaml
-kubectl -n shop get destinationrule,virtualservice
-kubectl -n shop port-forward svc/frontend 8080:8080
-```
-
-In another terminal:
-
-```bash
-for i in {1..50}; do curl -s http://localhost:8080/call/catalog; done
-```
-
-Expect both versions, approximately 80/20 over a sufficiently large sample. Small samples are statistical, not exact counts. `DestinationRule` defines subsets using Pod labels; `VirtualService` chooses subsets and weights. Kubernetes Service discovery remains in place.
-
-Inspect:
-
-```bash
-istioctl analyze -n shop
-POD=$(kubectl -n shop get pod -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-istioctl proxy-config routes "$POD" -n shop
-```
-
-## 7. Header-based routing: beta gets v2
-
-```bash
-kubectl apply -f istio/12-catalog-header-route.yaml
-curl -s http://localhost:8080/call/catalog
-curl -s -H 'x-release: beta' http://localhost:8080/call/catalog
-```
-
-The `x-release: beta` request goes to v2. Other traffic follows 80/20.
-
-## 8. Timeout, retries, and fault injection
-
-```bash
-kubectl apply -f istio/20-reviews-resilience.yaml
-for i in {1..30}; do curl -i http://localhost:8080/call/reviews; done
-```
-
-Istio injects a 3-second delay into 30% of reviews requests. The frontend's client timeout is 2 seconds, making the delay observable. The VirtualService also declares an Istio timeout and retry policy. Fault injection is a test feature; remove it after the demo:
-
-```bash
-kubectl delete -f istio/20-reviews-resilience.yaml
-```
-
-## 9. Strict mTLS
-
-Confirm all `shop` workloads have sidecars, then:
-
-```bash
-kubectl apply -f istio/30-peer-authentication-strict.yaml
-kubectl -n shop get peerauthentication
-curl -s http://localhost:8080/call/catalog
-curl -s http://localhost:8080/call/reviews
-```
-
-Strict mTLS requires encrypted and mutually authenticated connections between participating workloads in this namespace. Envoy proxies use workload identities and certificates provisioned by Istio; application containers do not handle these certificates directly.
-
-Inspect proxy config:
-
-```bash
-POD=$(kubectl -n shop get pod -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-istioctl proxy-config clusters "$POD" -n shop
-```
-
-Do not use an uninjected Pod as the positive test under strict mTLS; plaintext connections should be rejected.
-
-## 10. Authorization policy
-
-```bash
-kubectl apply -f istio/31-authorization-policy.yaml
-kubectl -n shop get authorizationpolicy
-curl -s http://localhost:8080/call/catalog
-```
-
-The policy allows the `frontend` service account to issue HTTP GET to catalog. A different workload identity should be denied. mTLS authenticates and encrypts; `AuthorizationPolicy` decides which authenticated identity may perform an operation.
-
-## 11. Optional ingress Gateway
+Run:
 
 ```bash
 kubectl apply -f istio/00-demo-gateway.yaml
@@ -222,371 +174,508 @@ kubectl -n istio-system port-forward svc/istio-ingressgateway 8081:80
 curl -i -H 'Host: shop.local' http://localhost:8081/
 ```
 
-Gateway configures the edge proxy listener. VirtualService binds `shop.local` and routes ingress traffic to the frontend Service. Gateway alone does not define the application route.
+The key lesson:
 
-## Troubleshooting
+> **Ingress is a traffic direction. The ingress gateway is the controlled component used to receive traffic into the mesh.**
 
-```bash
-kubectl get pods -A
-kubectl -n shop get pods -o wide
-kubectl -n shop describe pod <pod-name>
-kubectl -n shop logs <pod-name> -c istio-proxy
-istioctl analyze -n shop
-istioctl proxy-status
-istioctl proxy-config routes <pod-name> -n shop
-istioctl proxy-config clusters <pod-name> -n shop
+---
+
+# 5. Scenario 03 — Egress
+
+Read this one carefully:
+
+- [Scenario 03 — Egress: normal Kubernetes first](scenarios/03-egress.md)
+
+## Normal Kubernetes
+
+A Pod can normally make an outbound request if the cluster/network allows it:
+
+```text
+Pod
+ |
+ v
+Node / CNI / routing
+ |
+ v
+NAT / network firewall
+ |
+ v
+Internet
+ |
+ v
+google.com
 ```
 
-| Symptom | Check |
-|---|---|
-| frontend ImagePullBackOff | Run build-and-load script after KIND creation. |
-| Missing istio-proxy | Label namespace and restart Deployments. |
-| Wrong route | Check subset labels, hosts, DestinationRule, VirtualService, and `istioctl analyze`. |
-| Strict mTLS breaks calls | Ensure caller and target Pods both have sidecars. |
-| Gateway 404 | Check Host header, Gateway selector, VirtualService binding, and Service port. |
-
-## Cleanup
-
-Stop port-forward commands, then run:
+For example, from a curl-capable Pod:
 
 ```bash
-./scripts/cleanup.sh
+kubectl run curl --rm -it --restart=Never --image=curlimages/curl:8.10.1 -- \
+  curl -I --max-time 10 https://www.google.com
 ```
 
-This deletes the KIND cluster and all resources inside it.
+There is no Istio egress gateway here.
 
-## Suggested 10-minute teaching flow
+## Istio: blocking unknown external destinations
 
-1. Minutes 0–2: baseline Kubernetes Service calls.
-2. Minutes 2–4: install Istio, inject and inspect `istio-proxy`.
-3. Minutes 4–6: 80/20 canary and beta header route.
-4. Minutes 6–8: latency/fault injection and retries.
-5. Minutes 8–10: strict mTLS and authorization.
+Istio can be configured with:
 
-**One-line explanation:** Kubernetes runs and connects services; Istio adds a programmable, observable, and secure traffic layer between services.
+```text
+outboundTrafficPolicy:
+  mode: REGISTRY_ONLY
+```
 
-## Official references
+In this mode, unknown external destinations are blocked unless they are explicitly registered, for example with a ServiceEntry.
 
-- [Istio architecture](https://istio.io/latest/docs/ops/deployment/architecture/)
-- [Istio Getting Started](https://istio.io/latest/docs/setup/getting-started/)
-- [Traffic Management](https://istio.io/latest/docs/concepts/traffic-management/)
-- [Security concepts](https://istio.io/latest/docs/concepts/security/)
-- [Supported releases](https://istio.io/latest/docs/releases/supported-releases/)
-- [KIND Quick Start](https://kind.sigs.k8s.io/docs/user/quick-start/)
+That gives us:
 
-# Advanced traffic and data-plane labs
+```text
+Pod
+ |
+ v
+Istio sidecar
+ |
+ +----> undeclared external host
+ |              X
+ |           BLOCKED
+ |
+ +----> declared ServiceEntry
+                |
+                v
+             allowed
+```
 
-## Ingress, egress, sidecar and ambient — the practical mental model
+Important:
 
-**Ingress** is traffic entering the mesh:
+**REGISTRY_ONLY is not a complete outbound firewall.** Istio documents it as primarily a way to block unknown destinations at the proxy and detect missing ServiceEntries. For strong egress enforcement, combine an egress gateway with Kubernetes NetworkPolicy/firewall/network controls.
 
-    User
-      |
-      v
-    Istio Ingress Gateway
-      |
-      v
-    frontend Service
-      |
-      v
-    application Pod
+## Istio Egress Gateway
 
-**Egress** is traffic leaving the mesh:
+The controlled path becomes:
 
-    application Pod
-      |
-      v
-    sidecar / ztunnel
-      |
-      v
-    Istio Egress Gateway
-      |
-      v
-    External API / Internet
+```text
+Application
+    |
+    v
+Source Envoy
+    |
+    v
+Istio Egress Gateway
+    |
+    v
+External service
+```
 
-An Istio Gateway configures an edge proxy. A Gateway resource defines listener/edge properties, while a VirtualService or Gateway API route defines application routing. Ingress and egress gateways are dedicated Envoy proxy deployments at the mesh edge. citeturn884347search9turn884347search6
+The egress gateway gives you a dedicated, observable exit point where Istio policies and TLS origination can be applied.
 
-### Sidecar mode
+Run the existing lab:
 
-Sidecar mode injects an Envoy proxy into every participating application Pod.
+```bash
+kubectl apply -f istio/40-egress-service-entry.yaml
+kubectl apply -f istio/41-egress-gateway.yaml
+kubectl apply -f istio/42-egress-routing.yaml
 
-    +------------------- Pod -------------------+
-    |                                            |
-    |  Application ---> Envoy istio-proxy       |
-    |                         |                  |
-    +-------------------------|------------------+
-                              |
-                         mesh traffic
+kubectl -n shop get serviceentry,gateway,virtualservice
+curl http://localhost:8080/call/external
+```
 
-The sidecar can process L4 and L7 traffic. This makes routing, retries, timeouts, fault injection, authorization and telemetry possible without putting that logic into the application. The trade-off is that every workload carries another proxy and its CPU/memory/configuration overhead. citeturn884347search8
+The exact security model is explained in the scenario document.
 
-### Ambient mode
+---
 
-Ambient removes the Envoy sidecar from the application Pod.
+# 6. Scenario 04 — Sidecar mode and mTLS
 
-    Node
-    +--------------------------------------+
-    | frontend Pod      catalog Pod        |
-    |       |                 |            |
-    |       +--------+--------+            |
-    |                |                     |
-    |             ztunnel                  |
-    +--------------------------------------+
+Read:
 
-ztunnel is a per-node L4 proxy. It provides the secure overlay and HBONE transport. When L7 features are required, a waypoint proxy is added; the waypoint is an Envoy proxy outside the application Pod. citeturn884347search3turn884347search12
+- [Scenario 04 — Sidecar and mTLS](scenarios/04-sidecar-mtls.md)
 
-The key difference is therefore not "Istio versus no Istio":
+Enable injection:
 
-    Sidecar:
-    application + Envoy in every Pod
-
-    Ambient:
-    application Pod + node ztunnel
-                      +
-                  optional waypoint for L7
-
-## Lab: sidecar mode and encrypted traffic
-
-Run the existing sidecar lab first:
-
-    ./scripts/build-and-load.sh
-    ./scripts/deploy-baseline.sh
-    ./scripts/install-istio.sh
-    ./scripts/enable-mesh.sh
-
-Verify the sidecar:
-
-    POD=$(kubectl -n shop get pod -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-    kubectl -n shop get pod "$POD" -o jsonpath='{.spec.containers[*].name}{"\n"}'
-    istioctl proxy-status
-
-You should see the application container and istio-proxy.
-
-Enable strict mTLS:
-
-    kubectl apply -f istio/30-peer-authentication-strict.yaml
-
-Verify the workload certificates loaded by Envoy:
-
-    istioctl proxy-config secret "$POD" -n shop
-
-Inspect the proxy cluster configuration:
-
-    istioctl proxy-config clusters "$POD" -n shop
-
-Then generate traffic:
-
-    kubectl -n shop port-forward svc/frontend 8080:8080
-    curl http://localhost:8080/call/catalog
-
-The important traffic path is:
-
-    frontend application
-          |
-          | plaintext HTTP inside source Pod
-          v
-    frontend Envoy
-          |
-          | ===== mTLS encrypted =====
-          v
-    catalog Envoy
-          |
-          | plaintext HTTP inside destination Pod
-          v
-    catalog application
-
-mTLS protects the proxy-to-proxy network connection. The application itself does not need to implement TLS. Istio provisions workload identities/certificates and uses them for mutual authentication and encrypted transport. citeturn884347search6
-
-### Packet-level encryption exercise
-
-For a stronger demonstration, capture packets on the KIND node while the request is running. This is useful because application logs alone do not prove encryption.
-
-Find the node:
-
-    docker ps --format 'table {{.Names}}	{{.Image}}'
-
-Enter the KIND control-plane container:
-
-    docker exec -it istio-lab-control-plane sh
-
-If tcpdump is available, inspect traffic:
-
-    tcpdump -i any -nn -A tcp
-
-Generate requests from another terminal:
-
-    for i in {1..20}; do curl -s http://localhost:8080/call/catalog; done
-
-You should not expect to see the original application HTTP payload on the proxy-to-proxy network path; that hop is protected by Istio mTLS.
-
-Important: traffic inside the source Pod before interception and traffic after decryption at the destination proxy are not the same network hop. Therefore, "I can see HTTP in a packet capture" is not automatically proof that mTLS is broken.
-
-## Lab: Ingress Gateway
-
-Apply:
-
-    kubectl apply -f istio/00-demo-gateway.yaml
-
-Expose the gateway locally:
-
-    kubectl -n istio-system port-forward svc/istio-ingressgateway 8081:80
-
-Call it with the required host:
-
-    curl -i -H 'Host: shop.local' http://localhost:8081/
-
-The path is:
-
-    client
-      |
-      v
-    Istio Ingress Gateway
-      |
-      v
-    frontend Service
-      |
-      v
-    frontend Pod
-
-This is different from directly port-forwarding the frontend Service. The Gateway gives you a dedicated mesh entry point where TLS/listener configuration and edge traffic policies can be applied. citeturn884347search13turn884347search9
-
-## Lab: Egress Gateway
-
-This lab uses an external HTTP service definition and routes traffic through the dedicated Istio egress gateway.
-
-Apply:
-
-    kubectl apply -f istio/40-egress-service-entry.yaml
-    kubectl apply -f istio/41-egress-gateway.yaml
-    kubectl apply -f istio/42-egress-routing.yaml
+```bash
+./scripts/install-istio.sh
+./scripts/enable-mesh.sh
+```
 
 Inspect:
 
-    kubectl -n shop get serviceentry
-    kubectl -n shop get gateway
-    kubectl -n shop get virtualservice
+```bash
+kubectl -n shop get pods
+istioctl proxy-status
+```
 
-The intended path is:
+A participating Pod becomes conceptually:
 
-    frontend
+```text
++--------------------------- Pod ---------------------------+
+|                                                           |
+|  Application  <---->  Envoy istio-proxy                  |
+|                                                           |
++-----------------------------------------------------------+
+```
+
+With strict mTLS:
+
+```text
+frontend application
        |
        v
-    frontend sidecar
+frontend Envoy
+       |
+       | ===== mTLS encrypted =====
+       v
+catalog Envoy
        |
        v
-    Istio Egress Gateway
+catalog application
+```
+
+The application does not need to implement this mesh mTLS itself.
+
+Verify:
+
+```bash
+kubectl apply -f istio/30-peer-authentication-strict.yaml
+
+POD=$(kubectl -n shop get pod -l app=frontend -o jsonpath='{.items[0].metadata.name}')
+istioctl proxy-config secret "$POD" -n shop
+istioctl proxy-config clusters "$POD" -n shop
+```
+
+The scenario also contains a packet-capture exercise.
+
+---
+
+# 7. Scenario 05 — Traffic routing
+
+Read:
+
+- [Scenario 05 — Routing](scenarios/05-routing.md)
+
+First Kubernetes:
+
+```text
+frontend
+   |
+   v
+catalog Service
+   |
+   +----> v1
+   |
+   +----> v2
+```
+
+Then Istio:
+
+```text
+frontend
+   |
+   v
+VirtualService
+   |
+   +---- 80% ----> catalog v1
+   |
+   +---- 20% ----> catalog v2
+```
+
+And:
+
+```text
+x-release: beta
+        |
+        v
+catalog v2
+```
+
+Run:
+
+```bash
+kubectl apply -f istio/10-catalog-destination-rule.yaml
+kubectl apply -f istio/11-catalog-canary-virtual-service.yaml
+kubectl apply -f istio/12-catalog-header-route.yaml
+
+for i in {1..50}; do curl -s http://localhost:8080/call/catalog; done
+curl -s -H 'x-release: beta' http://localhost:8080/call/catalog
+```
+
+---
+
+# 8. Scenario 06 — Resilience
+
+Read:
+
+- [Scenario 06 — Resilience](scenarios/06-resilience.md)
+
+Normal Kubernetes does not automatically give your application:
+
+- HTTP retries
+- request timeout policy
+- fault injection
+- application-aware traffic behavior
+
+With Istio:
+
+```text
+frontend
+   |
+   v
+Envoy
+   |
+   +-- timeout
+   +-- retry
+   +-- fault injection
+   |
+   v
+reviews
+```
+
+Run:
+
+```bash
+kubectl apply -f istio/20-reviews-resilience.yaml
+for i in {1..30}; do curl -i http://localhost:8080/call/reviews; done
+```
+
+The lab deliberately injects latency so you can observe the behavior.
+
+---
+
+# 9. Scenario 07 — Authorization
+
+Read:
+
+- [Scenario 07 — Authorization](scenarios/07-authorization.md)
+
+Normal Kubernetes networking answers:
+
+> Can these two workloads communicate?
+
+Istio AuthorizationPolicy can answer:
+
+> **Which authenticated workload identity is allowed to perform this operation?**
+
+Conceptually:
+
+```text
+frontend identity
        |
        v
-    httpbin.org
+AuthorizationPolicy
+       |
+       +---- GET catalog ----> ALLOW
+       |
+       +---- other operation -> DENY
+```
 
-An egress gateway gives you a dedicated, observable exit point where routing, authorization and TLS origination can be applied. It is especially useful when an organization requires external traffic to leave through controlled nodes. citeturn884347search0turn884347search2
+Run:
 
-Important security point: an Istio egress gateway configuration alone does not magically prevent every possible packet from bypassing the gateway. Strict enforcement may also require Kubernetes NetworkPolicy, firewall rules or cloud network controls. citeturn884347search2
+```bash
+kubectl apply -f istio/31-authorization-policy.yaml
+kubectl -n shop get authorizationpolicy
+curl -s http://localhost:8080/call/catalog
+```
 
-## Lab: Ambient mode
+mTLS provides workload identity/authentication; AuthorizationPolicy uses that identity for authorization.
 
-Use a fresh cluster for this comparison so the sidecar experiment and ambient experiment are clearly separated.
+---
 
-    ./scripts/cleanup.sh
-    kind create cluster --name istio-ambient-lab --config kind/cluster.yaml
+# 10. Scenario 08 — Ambient mode
 
-Install the ambient profile:
+Read:
 
-    istioctl install --set profile=ambient -y
+- [Scenario 08 — Ambient mode](scenarios/08-ambient.md)
 
-Verify ztunnel:
+Sidecar:
 
-    kubectl get pods -n istio-system
-    kubectl get daemonset -n istio-system
+```text
+Pod
++----------------------+
+| app + Envoy          |
++----------------------+
+```
 
-Deploy the ambient workloads:
+Ambient:
 
-    kubectl apply -f ambient/namespace.yaml
-    kubectl apply -f ambient/apps.yaml
+```text
+Node
++--------------------------------+
+| Pod            Pod             |
+| app            app             |
+|  |              |              |
+|  +------ ztunnel ------------- |
++--------------------------------+
+```
 
-Enroll the namespace:
+ztunnel provides the L4 secure overlay. It uses HBONE and mTLS for mesh traffic.
 
-    kubectl label namespace ambient-shop istio.io/dataplane-mode=ambient
+Run on a fresh cluster:
 
-Now inspect the application Pod:
+```bash
+./scripts/cleanup.sh
 
-    kubectl -n ambient-shop get pods
-    kubectl -n ambient-shop get pod -l app=frontend -o jsonpath='{.items[0].spec.containers[*].name}{"\n"}'
+kind create cluster --name istio-ambient-lab --config kind/cluster.yaml
+istioctl install --set profile=ambient -y
 
-You should see only the application container. There is no istio-proxy sidecar.
+kubectl apply -f ambient/namespace.yaml
+kubectl apply -f ambient/apps.yaml
+kubectl label namespace ambient-shop istio.io/dataplane-mode=ambient
+```
 
-This is the central ambient demonstration: the workload participates in the mesh without an Envoy container inside its Pod. Ambient enrollment also does not require restarting the application Pod. citeturn884347search8
+Inspect:
 
-Generate traffic:
+```bash
+kubectl -n ambient-shop get pods
+kubectl -n ambient-shop get pod -l app=frontend -o jsonpath='{.items[0].spec.containers[*].name}{"\n"}'
+istioctl ztunnel-config workloads
+```
 
-    kubectl -n ambient-shop exec deploy/frontend -- wget -qO- http://catalog:5678/
+You should not see an `istio-proxy` sidecar inside the application Pod.
 
-Inspect ambient workload state:
+---
 
-    istioctl ztunnel-config workloads
+# 11. Ambient waypoint
 
-The traffic path is:
+Ambient ztunnel is primarily L4.
 
-    frontend Pod
-        |
-        v
-    source-node ztunnel
-        |
-        | ===== HBONE + mTLS =====
-        v
-    destination-node ztunnel
-        |
-        v
-    catalog Pod
+For L7 processing, use a waypoint:
 
-Ambient ztunnel provides the secure L4 overlay and HBONE transport. citeturn884347search12turn884347search3
+```text
+Application
+    |
+    v
+ztunnel
+    |
+    v
+Waypoint Envoy
+    |
+    v
+destination ztunnel
+    |
+    v
+Application
+```
 
-## Lab: Ambient waypoint for L7
+Run:
 
-Ambient's ztunnel is intentionally L4. If you need L7 features such as HTTP routing, L7 authorization, retries, timeouts or fault injection, add a waypoint.
+```bash
+kubectl apply -f ambient/waypoint.yaml
+kubectl label namespace ambient-shop istio.io/use-waypoint=ambient-waypoint --overwrite
+kubectl get gateway -n ambient-shop
+kubectl get pods -n ambient-shop
+```
 
-Apply:
+This is why saying **"ambient means there is no Envoy"** is wrong.
 
-    kubectl apply -f ambient/waypoint.yaml
-    kubectl label namespace ambient-shop istio.io/use-waypoint=ambient-waypoint --overwrite
+The accurate statement is:
 
-Check:
+> Ambient removes the per-Pod Envoy sidecar. Envoy can still be used as a waypoint for L7 functionality.
 
-    kubectl get gateway -n ambient-shop
-    kubectl get pods -n ambient-shop
+---
 
-The architecture becomes:
+# 12. The complete mental model
 
-    frontend Pod
-        |
-        v
-    ztunnel
-        |
-        v
-    waypoint Envoy
-        |
-        v
-    destination ztunnel
-        |
-        v
-    catalog Pod
+After completing all scenarios, think about Istio like this:
 
-This is why ambient should not be described as "Istio without Envoy". Ambient removes per-Pod Envoys, but Envoy can still be used as a waypoint when L7 processing is needed. citeturn884347search7turn884347search12
+```text
+                         INGRESS
+                            |
+                            v
+                    Istio Ingress Gateway
+                            |
+                            v
+                       Application
+                            |
+                            v
+                  +-------------------+
+                  |   Istio data      |
+                  |      plane        |
+                  +-------------------+
+                     |       |      |
+                     v       v      v
+                  Routing  mTLS   AuthZ
+                     |       |      |
+                     v       v      v
+                  Services / Workloads
+                            |
+                            v
+                         EGRESS
+                            |
+                            v
+                    Egress Gateway
+                            |
+                            v
+                      Internet/API
+```
 
-## Sidecar vs ambient: what to say in an interview
+And the data-plane choices are:
 
-"Sidecar mode injects an Envoy proxy into each participating Pod. The proxy intercepts the application's traffic and can provide L4/L7 traffic management, mTLS, authorization and telemetry.
+```text
+Sidecar mode
+Application + Envoy per Pod
 
-Ambient mode moves the basic data-plane function out of the application Pods. A ztunnel runs on every node and provides a secure L4 overlay using HBONE and mTLS. When L7 features are needed, an Envoy waypoint is deployed outside the application Pods.
+Ambient mode
+Application Pod
+      +
+node-level ztunnel
+      +
+optional waypoint Envoy for L7
+```
 
-Ingress controls traffic entering the mesh. Egress controls traffic leaving the mesh. An ingress gateway is the controlled entry point, while an egress gateway is the controlled exit point for external services."
+---
+
+# 13. Important distinction
+
+Do not mix these concepts:
+
+**Ingress** = direction of traffic entering the mesh.
+
+**Ingress Gateway** = proxy/entry point used to handle that traffic.
+
+**Egress** = direction of traffic leaving the mesh.
+
+**Egress Gateway** = dedicated proxy/exit point used to control that traffic.
+
+**Gateway resource** = configuration describing listeners/edge behavior.
+
+**VirtualService** = routing rules.
+
+**ServiceEntry** = tells Istio about an external service.
+
+**REGISTRY_ONLY** = blocks unknown destinations at the Istio proxy; it is not a complete firewall.
+
+**NetworkPolicy/firewall** = network-level enforcement and useful defense in depth.
+
+---
+
+# 14. Recommended learning order
+
+Do not jump directly to advanced YAML.
+
+Follow this order:
+
+1. Normal Kubernetes Pod-to-Pod traffic
+2. Kubernetes Service
+3. Normal ingress
+4. Istio ingress
+5. Normal egress
+6. Istio egress
+7. Sidecar
+8. mTLS and packet capture
+9. VirtualService
+10. DestinationRule
+11. Resilience
+12. AuthorizationPolicy
+13. Ambient
+14. Waypoint
+15. Sidecar vs ambient comparison
+
+For each scenario, explain the **normal Kubernetes traffic first**. Only then introduce the Istio object that changes the behavior.
 
 ## Official references
 
-- Istio data-plane modes: https://istio.io/latest/docs/overview/dataplane-modes/
-- Ambient architecture: https://istio.io/latest/docs/ambient/overview/
-- Ambient waypoints: https://istio.io/latest/docs/ambient/usage/waypoint/
-- Ambient egress gateway: https://istio.io/latest/docs/ambient/usage/egress-gateway/
-- Ingress gateway: https://istio.io/latest/docs/tasks/traffic-management/ingress/
+- Istio architecture: https://istio.io/latest/docs/ops/deployment/architecture/
+- Traffic management: https://istio.io/latest/docs/concepts/traffic-management/
+- Egress control: https://istio.io/latest/docs/tasks/traffic-management/egress/egress-control/
 - Egress gateway: https://istio.io/latest/docs/tasks/traffic-management/egress/egress-gateway/
-- TLS configuration: https://istio.io/latest/docs/ops/configuration/traffic-management/tls-configuration/
+- Sidecar reference: https://istio.io/latest/docs/reference/config/networking/sidecar/
+- Ambient overview: https://istio.io/latest/docs/ambient/overview/
+- Ambient waypoints: https://istio.io/latest/docs/ambient/usage/waypoint/
+- KIND: https://kind.sigs.k8s.io/docs/user/quick-start/
