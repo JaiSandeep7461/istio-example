@@ -1,0 +1,26 @@
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: catalog
+  namespace: shop
+spec:
+  hosts:
+    - catalog
+  http:
+    - match:
+        - headers:
+            x-release:
+              exact: beta
+      route:
+        - destination:
+            host: catalog
+            subset: v2
+    - route:
+        - destination:
+            host: catalog
+            subset: v1
+          weight: 80
+        - destination:
+            host: catalog
+            subset: v2
+          weight: 20
