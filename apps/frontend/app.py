@@ -5,6 +5,7 @@ import os
 
 CATALOG_URL = os.getenv("CATALOG_URL", "http://catalog:5678/")
 REVIEWS_URL = os.getenv("REVIEWS_URL", "http://reviews:5678/")
+EXTERNAL_URL = os.getenv("EXTERNAL_URL", "http://httpbin.org/get")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -27,6 +28,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.call_service(CATALOG_URL, {"x-release": self.headers.get("x-release", "")})
         if self.path.startswith("/call/reviews"):
             return self.call_service(REVIEWS_URL)
+        if self.path.startswith("/call/external"):
+            return self.call_service(EXTERNAL_URL)
         return self.respond(404, "not found\n")
 
     def call_service(self, url, extra_headers=None):
